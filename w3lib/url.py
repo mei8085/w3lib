@@ -854,8 +854,12 @@ def canonicalize_url(
     encoding: str | None = None,
     *,
     query_separator: str = "&",
+    keep_reserved: bool = False,
 ) -> str:
     r"""Return a normalized form of *url*, to compare or deduplicate URLs.
+
+    .. versionadded:: 2.7.0
+        The *keep_reserved* parameter.
 
     .. versionchanged:: 2.5.0
         Dot segments (``.`` and ``..``) in the path are now resolved, and
@@ -877,6 +881,17 @@ def canonicalize_url(
     - resolve dot segments (``.`` and ``..``) in the path
     - normalize IPv6 addresses in the host
 
+    By default, percent-encoded reserved characters (e.g. ``%5B``) in the
+    path are decoded into their literal form, which may make the canonical
+    form point to a different resource. Pass ``keep_reserved=True`` to keep
+    every percent-encoded reserved character (e.g. ``%2F``, ``%23``, ``%5B``)
+    percent-encoded in the output, normalized to upper-case hexadecimal
+    digits, so that URLs whose path hierarchy or query meaning depends on
+    those characters get different canonical forms. Percent-encoded
+    unreserved characters (e.g. ``%7E``) are still decoded, and percent
+    signs that are not part of a valid escape sequence are encoded as
+    ``%25``, so canonicalizing an already-canonical URL does not change it.
+
     >>> import w3lib.url
     >>>
     >>> # sorting query arguments
@@ -894,6 +909,10 @@ def canonicalize_url(
     >>> # resolving dot segments and normalizing an IPv6 address
     >>> w3lib.url.canonicalize_url('http://[::0:1]/a/../b')
     'http://[::1]/b'
+    >>>
+    >>> # keeping percent-encoded reserved characters in the path
+    >>> w3lib.url.canonicalize_url('http://www.example.com/a%2fb%5B', keep_reserved=True)
+    'http://www.example.com/a%2Fb%5B'
     >>>
 
     For more examples, see the tests in `tests/test_url.py`.
@@ -953,7 +972,13 @@ def canonicalize_url(
 
     # 2. decode percent-encoded sequences in path as UTF-8 (or keep raw bytes)
     #    and percent-encode path again (this normalizes to upper-case %XX)
-    path = _quote(_unquotepath(path), _PATH_SAFE_CHARS).decode() if path else "/"
+    if path:
+        unquoted_path = (
+            _unquotepath_keep_reserved(path) if keep_reserved else _unquotepath(path)
+        )
+        path = _quote(unquoted_path, _PATH_SAFE_CHARS).decode()
+    else:
+        path = "/"
 
     fragment = "" if not keep_fragments else fragment
 
@@ -1004,6 +1029,49 @@ def _unquotepath(path: str) -> bytes:
         .replace("%3f", "%253F")
         .replace("%3F", "%253F")
     )
+
+
+_UNRESERVED_BYTES = frozenset(RFC3986_UNRESERVED)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _unquotepath_keep_reserved(path: str) -> bytes:
+    """Decode *path* into bytes, decoding only percent-encoded unreserved
+    characters.
+
+    Percent-encoded reserved characters (and ``%25`` itself) are kept
+    percent-encoded, with their hexadecimal digits normalized to upper-case,
+    so that they keep differing from their literal counterparts, which may
+    point to a different resource (e.g. ``%2F`` vs ``/``). Percent signs
+    that do not start a valid escape sequence are encoded as ``%25``.
+    """
+    if "%" not in path:
+        return path.encode()
+    output = bytearray()
+    index = 0
+    length = len(path)
+    while index < length:
+        char = path[index]
+        if char != "%":
+            output += char.encode()
+            index += 1
+            continue
+        digits = path[index + 1 : index + 3]
+        if (
+            len(digits) == 2
+            and digits[0] in _HEX_DIGITS
+            and digits[1] in _HEX_DIGITS
+        ):
+            byte = int(digits, 16)
+            if byte in _UNRESERVED_BYTES:
+                output.append(byte)
+            else:
+                output += b"%" + digits.upper().encode("ascii")
+            index += 3
+        else:
+            output += b"%25"
+            index += 1
+    return bytes(output)
 
 
 def parse_url(

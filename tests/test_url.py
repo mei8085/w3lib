@@ -1803,6 +1803,76 @@ class TestCanonicalizeUrl:
         assert canonical == "https://example.com/a%23b,c"
         assert canonical == canonicalize_url(canonical)
 
+    def test_canonicalize_url_keep_reserved(self):
+        # Percent-encoded reserved characters in the path are kept encoded,
+        # with upper-case hexadecimal digits, so that they are not mistaken
+        # for their literal counterparts, which may point to a different
+        # resource.
+        assert (
+            canonicalize_url("http://www.example.com/a%2fb", keep_reserved=True)
+            == "http://www.example.com/a%2Fb"
+        )
+        assert (
+            canonicalize_url(
+                "http://www.example.com/a%23b%3Fc%5Bd%26e", keep_reserved=True
+            )
+            == "http://www.example.com/a%23b%3Fc%5Bd%26e"
+        )
+        # %2F does not merge path segments, unlike "/"
+        assert canonicalize_url(
+            "http://www.example.com/a%2Fb", keep_reserved=True
+        ) != canonicalize_url("http://www.example.com/a/b", keep_reserved=True)
+        # percent-encoded unreserved characters are decoded
+        assert (
+            canonicalize_url("http://www.example.com/%7Euser", keep_reserved=True)
+            == "http://www.example.com/~user"
+        )
+        # non-ASCII characters and non-UTF-8 sequences are kept encoded
+        assert (
+            canonicalize_url("http://www.example.com/résumé", keep_reserved=True)
+            == "http://www.example.com/r%C3%A9sum%C3%A9"
+        )
+        assert (
+            canonicalize_url("http://www.example.com/a%a3do", keep_reserved=True)
+            == "http://www.example.com/a%A3do"
+        )
+        # percent signs that do not start a valid escape sequence are encoded
+        assert (
+            canonicalize_url("http://www.example.com/a%zzb", keep_reserved=True)
+            == "http://www.example.com/a%25zzb"
+        )
+        assert (
+            canonicalize_url("http://www.example.com/a%2", keep_reserved=True)
+            == "http://www.example.com/a%252"
+        )
+        assert (
+            canonicalize_url("http://www.example.com/a%", keep_reserved=True)
+            == "http://www.example.com/a%25"
+        )
+        # %25 is kept encoded, so canonicalizing is idempotent
+        for url in (
+            "http://www.example.com/a%25b",
+            "http://www.example.com/a%2fb%23c%7Ed",
+            "http://www.example.com/a%zzb",
+            "http://www.example.com/résumé?q=résumé",
+        ):
+            canonical = canonicalize_url(url, keep_reserved=True)
+            assert canonical == canonicalize_url(canonical, keep_reserved=True)
+        # the query string keeps distinguishing encoded reserved characters
+        # from query separators
+        assert (
+            canonicalize_url("http://www.example.com/do?a=b%26c%3Dd", keep_reserved=True)
+            == "http://www.example.com/do?a=b%26c%3Dd"
+        )
+        assert canonicalize_url(
+            "http://www.example.com/do?a=b%26c%3Dd", keep_reserved=True
+        ) != canonicalize_url("http://www.example.com/do?a=b&c=d", keep_reserved=True)
+        # the default behavior is unchanged
+        assert (
+            canonicalize_url("http://www.example.com/a%5Bb")
+            == "http://www.example.com/a[b"
+        )
+
     def test_normalize_percent_encoding_in_query_arguments(self):
         assert (
             canonicalize_url("http://www.example.com/do?k=b%a3")

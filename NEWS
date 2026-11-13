@@ -1,6 +1,17 @@
 w3lib release notes
 ===================
 
+2.7.0 (unreleased)
+------------------
+
+New features:
+
+- :func:`~w3lib.url.canonicalize_url` now supports a ``keep_reserved``
+  parameter that keeps percent-encoded reserved characters in the path
+  percent-encoded (normalized to upper-case), so that URLs whose path
+  hierarchy or query meaning depends on those characters get different
+  canonical forms when deduplicating URLs.
+
 2.6.0 (2026-11-05)
 ------------------
 
