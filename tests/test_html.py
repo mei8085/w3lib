@@ -1604,6 +1604,183 @@ http://www.example.org/index.php" />
             ) == (3.0, "/a/b")
 
 
+class TestGetMetaRefreshEncodingBoundary:
+    """A refresh target written with ASCII-level mechanisms — character
+    references, percent-escapes and relative URLs — resolves to the same
+    resource whatever encoding is declared for the page bytes, because none
+    of these mechanisms involves a non-ASCII byte. Only raw non-ASCII bytes
+    in the URL depend on the declared encoding matching the page."""
+
+    BASEURL = "http://example.com/dir/page"
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "latin1"])
+    def test_character_reference_survives_encoding_mismatch(
+        self, encoding: str
+    ) -> None:
+        # "&#163;" is ASCII, so it decodes to "£" whatever encoding the
+        # UTF-8 page bytes are read with, and the target is the UTF-8
+        # percent-encoding of "£" either way.
+        body = b'<meta http-equiv="refresh" content="3;url=/to&#163;">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            3.0,
+            "http://example.com/to%C2%A3",
+        )
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "latin1"])
+    def test_percent_escape_not_double_encoded(self, encoding: str) -> None:
+        # An existing percent-escape is ASCII, so an encoding mismatch does
+        # not touch it, and safe_url_string leaves it alone instead of
+        # escaping the "%" again.
+        body = b'<meta http-equiv="refresh" content="3;url=/to%C2%A3?unit=%C2%B5">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            3.0,
+            "http://example.com/to%C2%A3?unit=%C2%B5",
+        )
+        # An escaped "%" stays escaped, and a bare "%" stays bare, as
+        # safe_url_string treats any other URL the same way.
+        body = b'<meta http-equiv="refresh" content="3;url=/100%25off">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            3.0,
+            "http://example.com/100%25off",
+        )
+        body = b'<meta http-equiv="refresh" content="3;url=/100%off">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            3.0,
+            "http://example.com/100%off",
+        )
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "latin1"])
+    def test_relative_url_stays_on_host(self, encoding: str) -> None:
+        # An ASCII relative URL resolves against the base URL on the
+        # original host however the page bytes are decoded.
+        body = b'<meta http-equiv="refresh" content="3;url=other.html">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            3.0,
+            "http://example.com/dir/other.html",
+        )
+        body = b'<meta http-equiv="refresh" content="3;url=../to&#163;">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            3.0,
+            "http://example.com/to%C2%A3",
+        )
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "latin1"])
+    def test_percent_escaped_slashes_do_not_change_host(self, encoding: str) -> None:
+        # "%2F%2F" is a path, not a scheme-relative URL: percent-escapes are
+        # not decoded before the URL is parsed, so the refresh stays on the
+        # original host.
+        body = b'<meta http-equiv="refresh" content="0;url=/to%2F%2Fevil.example/">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            0.0,
+            "http://example.com/to%2F%2Fevil.example/",
+        )
+
+    def test_character_reference_slashes_do_change_host(self) -> None:
+        # In contrast, a character reference is decoded before the URL is
+        # parsed, so "&sol;&sol;" spells "//" and the refresh is
+        # scheme-relative, as in a browser.
+        body = b'<meta http-equiv="refresh" content="0;url=&sol;&sol;other.example/">'
+        assert get_meta_refresh(body, self.BASEURL) == (
+            0.0,
+            "http://other.example/",
+        )
+
+    def test_raw_bytes_depend_on_the_declared_encoding(self) -> None:
+        # Raw non-ASCII bytes are the one encoding-sensitive case: read as
+        # Latin-1, the UTF-8 bytes of "£" decode to "Â£", and each
+        # misdecoded character is percent-encoded in turn.
+        body = '<meta http-equiv="refresh" content="3;url=/to£">'.encode()
+        assert get_meta_refresh(body, self.BASEURL, "utf-8") == (
+            3.0,
+            "http://example.com/to%C2%A3",
+        )
+        assert get_meta_refresh(body, self.BASEURL, "latin1") == (
+            3.0,
+            "http://example.com/to%C3%82%C2%A3",
+        )
+        # A Latin-1 byte that is invalid UTF-8 decodes to U+FFFD, as in a
+        # browser, instead of failing the extraction.
+        body = b'<meta http-equiv="refresh" content="3;url=/to\xa3">'
+        assert get_meta_refresh(body, self.BASEURL, "utf-8") == (
+            3.0,
+            "http://example.com/to%EF%BF%BD",
+        )
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            # no interval
+            "url=/x",
+            # an interval that is not ASCII digits
+            "x;url=/x",
+            # no separator between the interval and the URL
+            "0url=/x",
+            # no content at all
+            "",
+            # a URL that cannot be parsed
+            "3;url=https://example.com:80x/",
+        ],
+    )
+    def test_malformed_refresh_declares_no_target(self, content: str) -> None:
+        body = f'<meta http-equiv="refresh" content="{content}">'.encode()
+        assert get_meta_refresh(body, self.BASEURL) == (None, None)
+
+    def test_malformed_refresh_yields_to_a_later_valid_one(self) -> None:
+        body = (
+            b'<meta http-equiv="refresh" content="junk">'
+            b'<meta http-equiv="refresh" content="3;url=/next">'
+        )
+        assert get_meta_refresh(body, self.BASEURL) == (
+            3.0,
+            "http://example.com/next",
+        )
+
+    @pytest.mark.parametrize("encoding", ["utf-8", "latin1"])
+    def test_attribute_entity_forgery_declares_no_target(self, encoding: str) -> None:
+        # A reference is decoded into the value of its own attribute, so it
+        # cannot spell out an http-equiv attribute, whatever encoding the
+        # page bytes are read with.
+        body = (
+            b'<meta data-x="&#34; http-equiv=&#34;refresh&#34;" '
+            b'content="0;url=http://evil.example/">'
+        )
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (None, None)
+        # Nor can a reference in an attribute name, which is never decoded.
+        body = b'<meta http&#45;equiv="refresh" content="0;url=http://evil.example/">'
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (None, None)
+        # The genuine attributes of the same tag are still read.
+        body = (
+            b'<meta data-x="&#34; content=&#34;0;url=http://evil.example/&#34;" '
+            b'http-equiv="refresh" content="5;url=/next">'
+        )
+        assert get_meta_refresh(body, self.BASEURL, encoding) == (
+            5.0,
+            "http://example.com/next",
+        )
+
+    @pytest.mark.filterwarnings("ignore:Passing a relative:DeprecationWarning")
+    def test_fallback_scan_matches_on_ascii_level_urls(self) -> None:
+        # The regex scan that runs for a relative base URL resolves
+        # ASCII-level targets the same way the browser-like scan does.
+        body = b'<meta http-equiv="refresh" content="3;url=/to&#163;">'
+        assert get_meta_refresh(body, "/dir/page", "latin1") == (
+            3.0,
+            "/to%C2%A3",
+        )
+        body = b'<meta http-equiv="refresh" content="3;url=/to%C2%A3">'
+        assert get_meta_refresh(body, "/dir/page", "latin1") == (
+            3.0,
+            "/to%C2%A3",
+        )
+        body = b'<meta http-equiv="refresh" content="0;url=/to%2F%2Fevil.example/">'
+        assert get_meta_refresh(body, "/dir/page", "latin1") == (
+            0.0,
+            "/to%2F%2Fevil.example/",
+        )
+        body = b'<meta http-equiv="refresh" content="0url=/x">'
+        assert get_meta_refresh(body, "/dir/page", "latin1") == (None, None)
+
+
 @pytest.mark.filterwarnings("ignore:Passing a relative:DeprecationWarning")
 class TestRelativeBaseurl:
     @pytest.mark.parametrize(
